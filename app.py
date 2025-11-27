@@ -1,11 +1,10 @@
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 import chromadb
-from chromadb.config import Settings
 import argostranslate.package
 import argostranslate.translate
 import warnings
-import os
+import re
 
 # -------------------------------
 # SUPPRESS WARNINGS
@@ -24,10 +23,9 @@ def load_translators():
     argostranslate.package.update_package_index()
     available = argostranslate.package.get_available_packages()
 
+    # Install Hebrew -> English
     for pkg in available:
         if pkg.from_code == "he" and pkg.to_code == "en":
-            pkg.install()
-        if pkg.from_code == "yi" and pkg.to_code == "en":
             pkg.install()
     return True
 
@@ -35,15 +33,9 @@ model = load_embedding_model()
 load_translators()
 
 # -------------------------------
-# CHROMA CLIENT + PERSISTENT COLLECTION
+# CHROMA CLIENT + COLLECTION
 # -------------------------------
-STORAGE_DIR = os.path.join(os.getcwd(), "chroma_db")  # folder for persistence
-os.makedirs(STORAGE_DIR, exist_ok=True)
-
-chroma_client = chromadb.Client(Settings(
-    persist_directory=STORAGE_DIR
-))
-
+chroma_client = chromadb.Client()
 try:
     collection = chroma_client.get_collection("docs")
 except:
@@ -55,32 +47,34 @@ except:
 def embed(text):
     return model.encode(text).tolist()
 
-# -------------------------------
-# LANGUAGE DETECTION
-# -------------------------------
-def detect_language(text):
-    """
-    Simple script-based language detection:
-    - If the text contains typical Yiddish letters (ײ, ױ, װ), mark as 'yi'
-    - Otherwise, assume Hebrew 'he'
-    """
-    yiddish_markers = ["ײ", "ױ", "װ"]
-    if any(char in text for char in yiddish_markers):
-        return "yi"
-    return "he"
+def translate(text):
+    return argostranslate.translate.translate(text, "he", "en")
 
-def translate(text, lang):
-    return argostranslate.translate.translate(text, lang, "en")
-
-def index_document(doc_id, text, lang):
+def index_document(doc_id, text):
     vector = embed(text)
     collection.add(
         ids=[doc_id],
         embeddings=[vector],
         documents=[text],
-        metadatas=[{"lang": lang}]
+        metadatas=[{"lang": "he"}]
     )
-    collection.persist()  # save changes
+    # no collection.persist() needed
+
+# -------------------------------
+# Sentence splitting and snippet extraction
+# -------------------------------
+def split_sentences(text):
+    return re.split(r'(?<=[.!?])\s+', text)
+
+def get_context_snippet(text, query, window=2):
+    sentences = split_sentences(text)
+    for i, s in enumerate(sentences):
+        if query.lower() in s.lower():
+            start = max(0, i - window)
+            end = min(len(sentences), i + window + 1)
+            return " ".join(sentences[start:end])
+    # fallback: first 4 sentences
+    return " ".join(sentences[:4])
 
 def search(query):
     qv = embed(query)
@@ -88,9 +82,9 @@ def search(query):
     if not results["documents"][0]:
         return "No documents found."
     doc = results["documents"][0][0]
-    meta = results["metadatas"][0][0]
-    lang = meta["lang"]
-    translated = translate(doc, lang)
+    
+    snippet = get_context_snippet(doc, query, window=2)
+    translated = translate(snippet)
     return translated
 
 def list_documents():
@@ -103,20 +97,19 @@ def list_documents():
 def delete_documents(ids_to_delete):
     for doc_id in ids_to_delete:
         collection.delete(ids=[doc_id])
-    collection.persist()
 
 # -------------------------------
 # STREAMLIT UI
 # -------------------------------
-st.title("📄 AI Document Finder (Unified Upload)")
-st.write("Upload Hebrew or Yiddish documents, ask English questions, manage indexed documents.")
+st.title("📄 AI Document Finder (Hebrew Only)")
+st.write("Upload Hebrew documents, ask English questions, manage indexed documents.")
 
 # -------------------------------
-# Unified uploader
+# Upload
 # -------------------------------
 st.subheader("Upload Documents")
 uploaded_files = st.file_uploader(
-    "Upload Hebrew or Yiddish documents (any number)", type=["txt"], accept_multiple_files=True
+    "Upload Hebrew documents (any number)", type=["txt"], accept_multiple_files=True
 )
 
 if st.button("Index Documents"):
@@ -125,8 +118,7 @@ if st.button("Index Documents"):
         current_count = len(collection.get()['documents'])
         for i, file in enumerate(uploaded_files):
             text = file.read().decode("utf-8")
-            lang = detect_language(text)
-            index_document(f"doc_{current_count+i}", text, lang)
+            index_document(f"doc_{current_count+i}", text)
             total_files += 1
         st.success(f"{total_files} document(s) indexed successfully!")
     else:
