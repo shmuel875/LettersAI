@@ -1,0 +1,10 @@
+# Ignore ChromaDB persistence folder
+chroma_db/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# VSCode / IDE settings
+.vscode/
